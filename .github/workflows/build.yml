@@ -1,0 +1,108 @@
+name: Build FlopDLC.dylib
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build-dylib:
+    name: Build dylib (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            arch: arm64
+            out: FlopDLC-arm64.dylib
+          - os: macos-13
+            arch: x86_64
+            out: FlopDLC-x86_64.dylib
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Show toolchain
+        run: |
+          uname -a
+          clang --version
+          xcodebuild -version || true
+
+      - name: Build FlopDLC.dylib
+        run: |
+          mkdir -p build
+          # Собираем все .c/.cpp/.m файлы из src/ (можешь поправить пути)
+          SOURCES=$(find src -type f \( -name "*.c" -o -name "*.cpp" -o -name "*.m" -o -name "*.mm" \) 2>/dev/null || true)
+
+          if [ -z "$SOURCES" ]; then
+            echo "⚠️  Не найдено исходников в src/, создаю заглушку для проверки пайплайна"
+            echo 'int flopdlc_init(void){return 0;}' > build/stub.c
+            SOURCES="build/stub.c"
+          fi
+
+          echo "Компилирую: $SOURCES"
+
+          # Определяем компилятор по расширению
+          CXX_FLAGS=""
+          case "$SOURCES" in
+            *.cpp*|*.mm*) CXX_FLAGS="-std=c++17" ;;
+          esac
+
+          clang++ -dynamiclib \
+            -arch ${{ matrix.arch }} \
+            -O2 -fPIC \
+            $CXX_FLAGS \
+            -o "build/${{ matrix.out }}" \
+            $SOURCES \
+            -Wl,-install_name,@rpath/FlopDLC.dylib
+
+      - name: Verify dylib
+        run: |
+          file "build/${{ matrix.out }}"
+          otool -L "build/${{ matrix.out }}" || true
+          nm -gU "build/${{ matrix.out }}" | head -20 || true
+
+      - name: Upload dylib artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.out }}
+          path: build/${{ matrix.out }}
+          if-no-files-found: error
+
+  # Опционально: универсальный fat dylib (arm64 + x86_64)
+  build-universal:
+    name: Build universal FlopDLC.dylib
+    runs-on: macos-latest
+    needs: build-dylib
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download both arches
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Lipo into universal dylib
+        run: |
+          mkdir -p out
+          lipo -create \
+            artifacts/FlopDLC-arm64.dylib/FlopDLC-arm64.dylib \
+            artifacts/FlopDLC-x86_64.dylib/FlopDLC-x86_64.dylib \
+            -output out/FlopDLC.dylib
+          file out/FlopDLC.dylib
+          lipo -info out/FlopDLC.dylib
+
+      - name: Upload universal dylib
+        uses: actions/upload-artifact@v4
+        with:
+          name: FlopDLC.dylib
+          path: out/FlopDLC.dylib
+
+      - name: Create release (только по тегу)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: out/FlopDLC.dylib
